@@ -1,0 +1,370 @@
+<html>
+    <head>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.4.1/jquery.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/2.3.0/socket.io.js"></script>
+        <style>
+            .container {
+                display: grid;
+                min-width: 1250px;
+                height: 100%;
+                grid-template-areas: "infobox infobox infobox"
+                "userlistbox chatbox camerabox"
+                "empty-container chat-controls chat-controls";
+                grid-template-columns: 10em 1fr 500px;
+                grid-template-rows: 16em 1fr 5em;
+                grid-gap: 1rem;
+            }
+
+            .infobox {
+                grid-area: infobox;
+                overflow: auto;
+            }
+
+            .userlistbox {
+                grid-area: userlistbox;
+                border: 1px solid black;
+                margin:0;
+                padding:1px;
+                list-style:none;
+                line-height:1.1;
+                overflow-y:auto;
+                overflow-x:hidden;
+            }
+
+            .userlistbox li {
+                cursor: pointer;
+                padding: 1px;
+            }
+
+            .chatbox {
+                grid-area: chatbox;
+                border: 1px solid black;
+                margin: 0;
+                overflow-y: scroll;
+                padding: 1px;
+                padding: 0.1rem 0.5rem;
+            }
+
+            .camerabox {
+                grid-area: camerabox;
+                width: 500px;
+                height: 375px;
+                border: 1px solid black;
+                vertical-align: top;
+                display: block;
+                position:relative;
+                overflow:auto;
+            }
+
+            #received_video {
+                width: 100%;
+                height: 100%;
+                position:absolute;
+            }
+
+            /* The small "preview" view of your camera */
+            #local_video {
+                width: 500px;
+                height: 375px;
+                position: absolute;
+                top: 1rem;
+                left: 1rem;
+                border: 1px solid rgba(255, 255, 255, 0.75);
+                box-shadow: 0 0 4px black;
+            }
+
+            /* The "Hang up" button */
+            #hangup-button {
+                display:block;
+                width:80px;
+                height:24px;
+                border-radius: 8px;
+                position:relative;
+                margin:auto;
+                top:calc(100% - 40px);
+                background-color: rgba(150, 0, 0, 0.7);
+                border: 1px solid rgba(255, 255, 255, 0.7);
+                box-shadow: 0px 0px 1px 2px rgba(0, 0, 0, 0.4);
+                font-size: 14px;
+                font-family: "Lucida Grande", "Arial", sans-serif;
+                color: rgba(255, 255, 255, 1.0);
+                cursor: pointer;
+            }
+
+            #hangup-button:hover {
+                filter: brightness(150%);
+                -webkit-filter: brightness(150%);
+            }
+
+            #hangup-button:disabled {
+                filter: grayscale(50%);
+                -webkit-filter: grayscale(50%);
+                cursor: default;
+            }
+
+            .empty-container {
+                grid-area: empty-container;
+            }
+
+            .chat-controls {
+                grid-area: chat-controls;
+                width: 100%;
+                height: 100%;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="flexChild" id="camera-container">
+            <div class="camera-box">
+                <video id="received_video" autoplay></video>
+                <video id="local_video" autoplay muted></video>
+                <button id="hangup-button" onclick="hangUpCall();" disabled>
+                    Hang Up
+                </button>
+            </div>
+        </div>
+        <script>
+          function getParameterByName(name, url) {
+            if (!url) url = window.location.href;
+            name = name.replace(/[\[\]]/g, '\\$&');
+            var regex = new RegExp('[?&]' + name + '(=([^&#]*)|&|#|$)'),
+              results = regex.exec(url);
+            if (!results) return null;
+            if (!results[2]) return '';
+            return decodeURIComponent(results[2].replace(/\+/g, ' '));
+          }
+
+
+          //var socket = io('https://webrtc-videocalling.herokuapp.com:4001');
+          var socket = io('http://localhost:4001');
+          var myPeerConnection;
+          function sendToServer(msg) {
+            var msgJSON = JSON.stringify(msg);
+
+            socket.emit('event', msgJSON);
+          }
+
+          var mediaConstraints = {
+            audio: true,
+            video: true
+          };
+
+          function invite(evt) {
+            if (myPeerConnection) {
+              alert("You can't start a call because you already have one open!");
+            } else {
+
+              createPeerConnection();
+
+              navigator.mediaDevices.getUserMedia(mediaConstraints)
+                .then(function(localStream) {
+                  document.getElementById("local_video").srcObject = localStream;
+                  localStream.getTracks().forEach(track => myPeerConnection.addTrack(track, localStream));
+                })
+                .catch(handleGetUserMediaError);
+            }
+          }
+
+          function handleGetUserMediaError(e) {
+            switch(e.name) {
+              case "NotFoundError":
+                alert("Unable to open your call because no camera and/or microphone" +
+                  "were found.");
+                break;
+              case "SecurityError":
+              case "PermissionDeniedError":
+                // Do nothing; this is the same as the user canceling the call.
+                break;
+              default:
+                alert("Error opening your camera and/or microphone: " + e.message);
+                break;
+            }
+
+            closeVideoCall();
+          }
+
+          function createPeerConnection() {
+            myPeerConnection = new RTCPeerConnection({
+              iceServers: [
+                {
+                  urls: "stun:stun.stunprotocol.org"
+                }
+              ]
+            });
+
+            myPeerConnection.onicecandidate = handleICECandidateEvent;
+            myPeerConnection.ontrack = handleTrackEvent;
+            myPeerConnection.onnegotiationneeded = handleNegotiationNeededEvent;
+            myPeerConnection.onremovetrack = handleRemoveTrackEvent;
+            myPeerConnection.oniceconnectionstatechange = handleICEConnectionStateChangeEvent;
+            myPeerConnection.onicegatheringstatechange = handleICEGatheringStateChangeEvent;
+            myPeerConnection.onsignalingstatechange = handleSignalingStateChangeEvent;
+          }
+
+          function handleNegotiationNeededEvent() {
+            myPeerConnection.createOffer().then(function(offer) {
+              return myPeerConnection.setLocalDescription(offer);
+            })
+              .then(function() {
+                sendToServer({
+                  type: "video-offer",
+                  sdp: myPeerConnection.localDescription
+                });
+              })
+              .catch((error) => {console.log("error here", error);});
+          }
+          if(getParameterByName('callee') == 0) {
+            invite();
+          }
+
+          /* Answer Call */
+
+          function handleVideoAnswerMsg(msg){
+            var desc = new RTCSessionDescription(msg.sdp);
+            myPeerConnection.setRemoteDescription(desc).then(function () {
+              return navigator.mediaDevices.getUserMedia(mediaConstraints);
+            })
+          }
+
+          function handleVideoOfferMsg(msg) {
+
+            var localStream = null;
+
+            createPeerConnection();
+
+            var desc = new RTCSessionDescription(msg.sdp);
+
+            myPeerConnection.setRemoteDescription(desc).then(function () {
+              return navigator.mediaDevices.getUserMedia(mediaConstraints);
+            })
+              .then(function(stream) {
+                localStream = stream;
+                document.getElementById("local_video").srcObject = localStream;
+
+                localStream.getTracks().forEach(track => myPeerConnection.addTrack(track, localStream));
+              })
+              .then(function() {
+                return myPeerConnection.createAnswer();
+              })
+              .then(function(answer) {
+                return myPeerConnection.setLocalDescription(answer);
+              })
+              .then(function() {
+                var msg = {
+                  type: "video-answer",
+                  sdp: myPeerConnection.localDescription
+                };
+
+                sendToServer(msg);
+              })
+              .catch(handleGetUserMediaError);
+          }
+
+          socket.on('event', function(data){
+            const newData = JSON.parse(data);
+            if(newData.type == 'new-ice-candidate'){
+              handleNewICECandidateMsg(newData);
+            }
+            else if(newData.type == 'video-offer'){
+              handleVideoOfferMsg(newData);
+            }
+            else if(newData.type == 'video-answer'){
+                handleVideoAnswerMsg(newData);
+            }
+          });
+
+          function handleICECandidateEvent(event) {
+            if (event.candidate) {
+              sendToServer({
+                type: "new-ice-candidate",
+                candidate: event.candidate
+              });
+            }
+          }
+
+          function handleNewICECandidateMsg(msg) {
+            if(msg.candidate) {
+              var candidate = new RTCIceCandidate(msg.candidate);
+
+              myPeerConnection.addIceCandidate(candidate)
+                .catch((error) => {console.log("handleNewICECandidateMsg",error)});
+            }
+          }
+
+          function handleTrackEvent(event) {
+            document.getElementById("received_video").srcObject = event.streams[0];
+            document.getElementById("hangup-button").disabled = false;
+          }
+
+          function handleRemoveTrackEvent(event) {
+            var stream = document.getElementById("received_video").srcObject;
+            var trackList = stream.getTracks();
+
+            if (trackList.length == 0) {
+              closeVideoCall();
+            }
+          }
+
+          function hangUpCall() {
+            closeVideoCall();
+            sendToServer({
+              type: "hang-up"
+            });
+          }
+
+          function closeVideoCall() {
+            var remoteVideo = document.getElementById("received_video");
+            var localVideo = document.getElementById("local_video");
+
+            if (myPeerConnection) {
+              myPeerConnection.ontrack = null;
+              myPeerConnection.onremovetrack = null;
+              myPeerConnection.onremovestream = null;
+              myPeerConnection.onicecandidate = null;
+              myPeerConnection.oniceconnectionstatechange = null;
+              myPeerConnection.onsignalingstatechange = null;
+              myPeerConnection.onicegatheringstatechange = null;
+              myPeerConnection.onnegotiationneeded = null;
+
+              if (remoteVideo.srcObject) {
+                remoteVideo.srcObject.getTracks().forEach(track => track.stop());
+              }
+
+              if (localVideo.srcObject) {
+                localVideo.srcObject.getTracks().forEach(track => track.stop());
+              }
+
+              myPeerConnection.close();
+              myPeerConnection = null;
+            }
+
+            remoteVideo.removeAttribute("src");
+            remoteVideo.removeAttribute("srcObject");
+            localVideo.removeAttribute("src");
+            remoteVideo.removeAttribute("srcObject");
+
+            document.getElementById("hangup-button").disabled = true;
+          }
+
+          function handleICEConnectionStateChangeEvent(event) {
+            switch(myPeerConnection.iceConnectionState) {
+              case "closed":
+              case "failed":
+              case "disconnected":
+                closeVideoCall();
+                break;
+            }
+          }
+
+          function handleSignalingStateChangeEvent(event) {
+            switch(myPeerConnection.signalingState) {
+              case "closed":
+                closeVideoCall();
+                break;
+            }
+          };
+
+          function handleICEGatheringStateChangeEvent(event) {}
+        </script>
+    </body>
+</html>
